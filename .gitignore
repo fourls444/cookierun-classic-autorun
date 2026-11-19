@@ -1,0 +1,30 @@
+# Local settings and session data
+/last_settings.json
+/last_settings.json.tmp
+/stats/
+/debug_screens/
+/command.txt
+
+# Python and tools
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage*
+build/
+dist/
+*.egg-info/
+
+# Backups, secrets, and Windows metadata
+backup-*/
+*.bak
+*.tmp
+*.log
+.env
+.env.*
+Thumbs.db
+Desktop.ini
+.DS_Store
