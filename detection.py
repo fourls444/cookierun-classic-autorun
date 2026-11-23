@@ -80,10 +80,13 @@ def _crop_region(img, region):
 
 
 def detect_templates(screen, template_files, region=None):
-    screen_gray = _normalize_gray(screen)
-    if screen_gray is None:
+    normalized = _normalize(screen)
+    if normalized is None:
         return []
-    screen_gray = _crop_region(screen_gray, region)
+    area = _crop_region(normalized, region)
+    if not area.size:
+        return []
+    screen_gray = cv2.cvtColor(area, cv2.COLOR_BGR2GRAY)
     offset_x, offset_y = (region[0], region[1]) if region is not None else (0, 0)
     matches = []
     for filename in template_files:

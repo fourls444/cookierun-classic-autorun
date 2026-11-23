@@ -1,3 +1,5 @@
+import numpy as np
+import cv2
 import random
 import time
 
@@ -64,6 +66,7 @@ from config import (
     CONNECTION_LOST_RELOAD_BUTTON,
 )
 from detection import detect_templates, detect_anti_bot_odd_cards, detect_stage
+from startup_updates import StartupUpdates
 from config import (
     ANTI_BOT_CARD_POS_1, ANTI_BOT_CARD_POS_2, ANTI_BOT_CARD_POS_3,
     ANTI_BOT_CARD_POS_4, ANTI_BOT_CARD_POS_5, ANTI_BOT_CARD_POS_6,
@@ -267,58 +270,143 @@ def handle_inactive():
     time.sleep(random.uniform(10, 15))
 
 
-def handle_send_friend_life():
+def heart_send_confirmed(before, after, button):
+    if not isinstance(before, np.ndarray) or not isinstance(after, np.ndarray) or before.shape != after.shape:
+        return False
+    x, y, w, h = button
+    height, width = after.shape[:2]
+    left = max(0, x - 150)
+    stable_row = before[y:y + h, left:x - 10]
+    returned_row = after[y:y + h, left:x - 10]
+    if not stable_row.size or max(cv2.mean(cv2.absdiff(stable_row, returned_row))[:3]) > 18:
+        return False
+    region = (max(0, x - 8), max(0, y - 8), min(width, x + w + 8), min(height, y + h + 8))
+    return not detect_templates(after, FRIEND_SEND_LIFE_TEMPLATE, region)
+
+
+def heart_list_moved(before, after):
+    if not isinstance(before, np.ndarray) or not isinstance(after, np.ndarray) or before.shape != after.shape:
+        return False
+    first = before[274:615, 150:708]
+    second = after[274:615, 150:708]
+    return bool(first.size and np.mean(np.max(cv2.absdiff(first, second), axis=2) > 24) > 0.012)
+
+
+def handle_send_friend_life(on_progress=None, *, until_exhausted=False, wait=None):
+    wait = time.sleep if wait is None else wait
+    popups = StartupUpdates()
+    sent = 0
     print("💌 Handling Send Friend Life...")
-    deadline = time.monotonic() + LIVES_TIMEOUT
+    deadline = None if until_exhausted else time.monotonic() + LIVES_TIMEOUT
     screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
-    # Scroll leaderboard to top stop when find the "FRIEND LEADERBOARD" template
-    for top_scroll in range(LIVES_MAX_TOP_SCROLLS + 1):
+    top_scroll = stalled = 0
+    while True:
+        if popups.dismiss_popup(screen, friend_only=True):
+            wait(0.5)
+            screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+            continue
         if detect_templates(screen, FRIEND_TOP_LEADERBOARD_TEMPLATE, FRIEND_TOP_LEADERBOARD_REGION):
             print("✅ Top of Friend Leaderboard reached.")
             break
-        if top_scroll == LIVES_MAX_TOP_SCROLLS or time.monotonic() >= deadline:
+        if stalled >= 3 or (deadline is not None and
+                            (top_scroll >= LIVES_MAX_TOP_SCROLLS or time.monotonic() >= deadline)):
             print("⚠️ Friend leaderboard top search limit reached. Skipping heart sending.")
-            return
+            return False
         print("🔄 Scrolling up to find Send Friend Life...")
         safe_device_scroll(DEVICE_IP, DEVICE_PORT, LEADERBOARD_BOTTOM_POSITION[0], LEADERBOARD_BOTTOM_POSITION[1], direction="down", distance=300, duration=150)
-        time.sleep(random.uniform(0.8, 1.4))
-        screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
-    # Scroll down, tap all send life buttons, stop when bottom leaderboard detected
+        wait(random.uniform(0.8, 1.4))
+        previous, screen = screen, device_capture_screen(DEVICE_IP, DEVICE_PORT)
+        if until_exhausted:
+            stalled = 0 if heart_list_moved(previous, screen) else stalled + 1
+        top_scroll += 1
+
     no_button_scroll_count = 0
     down_scroll_count = 0
+    stalled = 0
+    before_scroll = None
     while True:
-        if time.monotonic() >= deadline or down_scroll_count >= LIVES_MAX_DOWN_SCROLLS:
+        if deadline is not None and (time.monotonic() >= deadline or down_scroll_count >= LIVES_MAX_DOWN_SCROLLS):
             print("⚠️ Heart sending time/scroll limit reached. Returning to the main loop.")
             break
         screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
-        if detect_templates(screen, FRIEND_BOTTOM_LEADERBOARD_TEMPLATE, FRIEND_BOTTOM_LEADERBOARD_REGION):
-            print("✅ Bottom of Friend Leaderboard reached. Done sending lives.")
-            break
+        if popups.dismiss_popup(screen, friend_only=True):
+            wait(0.5)
+            continue
+        at_bottom = detect_templates(screen, FRIEND_BOTTOM_LEADERBOARD_TEMPLATE, FRIEND_BOTTOM_LEADERBOARD_REGION)
         send_life_button_coords = detect_templates(screen, FRIEND_SEND_LIFE_TEMPLATE, FRIEND_SEND_LIFE_REGION)
+        if at_bottom and not send_life_button_coords:
+            print("✅ Bottom of Friend Leaderboard reached. Done sending lives.")
+            return True
         if send_life_button_coords:
             no_button_scroll_count = 0
+            stalled = 0
+            before_scroll = None
             for x, y, w, h in send_life_button_coords:
-                if time.monotonic() >= deadline:
+                if deadline is not None and time.monotonic() >= deadline:
                     print("⚠️ Heart sending time limit reached.")
-                    return
+                    return False
                 print("💌 Sending life to friend...")
                 safe_device_tap(DEVICE_IP, DEVICE_PORT, x + w // 2, y + h // 2)
-                time.sleep(random.uniform(0.8, 1.4))
+                wait(random.uniform(0.8, 1.4))
+                confirm_position = CONFIRM_SEND_LIFE_BUTTON
+                confirm_screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+                if popups.dismiss_popup(confirm_screen, friend_only=True):
+                    wait(0.5)
+                    break
+                if on_progress:
+                    matches = detect_templates(confirm_screen, CONFIRM_SEND_LIFE_TEMPLATE, CONFIRM_SEND_LIFE_REGION)
+                    if not matches:
+                        print('⚠️ Heart confirmation dialog was not recognized.')
+                        return False
+                    cx, cy, cw, ch = matches[0]
+                    confirm_position = (cx + cw // 2, cy + ch // 2)
                 print("💌 Confirming send life...")
-                safe_device_tap(DEVICE_IP, DEVICE_PORT, CONFIRM_SEND_LIFE_BUTTON[0], CONFIRM_SEND_LIFE_BUTTON[1])
-                time.sleep(random.uniform(0.8, 1.4))
-                print("💌 Closing send life dialog...")
-                safe_device_tap(DEVICE_IP, DEVICE_PORT, CLOSE_SEND_LIFE_DIALOG_BUTTON[0], CLOSE_SEND_LIFE_DIALOG_BUTTON[1])
-                time.sleep(random.uniform(0.8, 1.4))
+                safe_device_tap(DEVICE_IP, DEVICE_PORT, *confirm_position)
+                wait(random.uniform(0.8, 1.4))
+                if on_progress:
+                    close_x, close_y = CLOSE_SEND_LIFE_DIALOG_BUTTON
+                    for _ in range(6):
+                        returned = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+                        if popups.dismiss_popup(returned, friend_only=True):
+                            wait(0.5)
+                            continue
+                        if heart_send_confirmed(screen, returned, (x, y, w, h)):
+                            break
+                        matches = detect_templates(returned, CONFIRM_SEND_LIFE_TEMPLATE, (480, 380, 950, 540))
+                        for cx, cy, cw, ch in matches:
+                            if abs(cx + cw // 2 - close_x) <= 32 and abs(cy + ch // 2 - close_y) <= 23:
+                                safe_device_tap(DEVICE_IP, DEVICE_PORT, cx + cw // 2, cy + ch // 2)
+                        wait(0.5)
+                    else:
+                        print('⚠️ Heart send could not be verified.')
+                        return False
+                    sent += 1
+                    on_progress(sent)
+                    screen = returned
+                    popups.popup_closes = 0
+                else:
+                    print("💌 Closing send life dialog...")
+                    safe_device_tap(DEVICE_IP, DEVICE_PORT, *CLOSE_SEND_LIFE_DIALOG_BUTTON)
+                    wait(random.uniform(0.8, 1.4))
         else:
-            no_button_scroll_count += 1
-            if no_button_scroll_count >= LIVES_MAX_EMPTY_SCROLLS:
-                print(f"⚠️ No send life buttons found for {LIVES_MAX_EMPTY_SCROLLS} consecutive checks. Giving up.")
-                break
-            print(f"🔄 No send life buttons found, scrolling down... ({no_button_scroll_count}/{LIVES_MAX_EMPTY_SCROLLS})")
+            if until_exhausted:
+                if before_scroll is not None:
+                    stalled = 0 if heart_list_moved(before_scroll, screen) else stalled + 1
+                if stalled >= 3:
+                    print("✅ Friend list no longer moves. Done sending lives.")
+                    return True
+                before_scroll = screen
+                print("🔄 Scrolling down to find more hearts...")
+            else:
+                no_button_scroll_count += 1
+                if no_button_scroll_count >= LIVES_MAX_EMPTY_SCROLLS:
+                    print(f"⚠️ No send life buttons found for {LIVES_MAX_EMPTY_SCROLLS} consecutive checks. Giving up.")
+                    break
+                print(f"🔄 No send life buttons found, scrolling down... ({no_button_scroll_count}/{LIVES_MAX_EMPTY_SCROLLS})")
             safe_device_scroll(DEVICE_IP, DEVICE_PORT, LEADERBOARD_TOP_POSITION[0], LEADERBOARD_TOP_POSITION[1], direction="up", distance=70, duration=150)
             down_scroll_count += 1
-            time.sleep(random.uniform(0.8, 1.4))
+            wait(random.uniform(0.8, 1.4))
+    return False
 
 
 def handle_quick_receive_and_send_lives():

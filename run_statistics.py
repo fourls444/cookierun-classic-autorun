@@ -10,6 +10,8 @@ BOX_TYPE_NAMES = ('wood', 'silver', 'gold', 'rainbow', 'unknown')
 REPORT_TYPE_NAMES = ('rainbow', 'gold', 'silver', 'wood', 'unknown')
 BOX_TYPE_LABELS = {'wood': 'Wooden', 'silver': 'Silver', 'gold': 'Gold',
                    'rainbow': 'Rainbow', 'unknown': 'Unknown type'}
+REWARD_FIELDS = {'coins': ('total_coins', 'known_coin_rounds'),
+                 'exp': ('total_exp', 'known_exp_rounds')}
 
 
 def format_summary(summary, title):
@@ -25,8 +27,12 @@ def format_summary(summary, title):
              for name in REPORT_TYPE_NAMES
              if name != 'unknown' or summary['box_type_totals'][name]]
     lines.append(f'Total Mystery Boxes: {summary["total_boxes"]} -> ' + ', '.join(types))
-    if summary['interrupted']:
-        lines.append(f'Interrupted rounds: {summary["interrupted"]}')
+    for name, (total, known) in REWARD_FIELDS.items():
+        completed = summary['completed']
+        count = summary[known]
+        value = f'{summary[total]:,}' if count or not completed else 'Unknown'
+        suffix = f' ({count}/{completed} rounds read)' if count < completed else ''
+        lines.append(f'Total {"Coins" if name == "coins" else "EXP"}: {value}{suffix}')
     return '\n'.join(lines)
 
 
@@ -37,34 +43,21 @@ def now():
 def write_json(path, data):
     temporary = path.with_suffix(path.suffix + '.tmp')
     with temporary.open('w', encoding='utf-8') as stream:
-        json.dump(data, stream, ensure_ascii=False, indent=2)
+        stream.write(json.dumps(data, ensure_ascii=False, indent=2))
         stream.flush()
         os.fsync(stream.fileno())
     os.replace(temporary, path)
 
 
-def summarize(rounds):
-    completed = [row for row in rounds if row['status'] == 'completed']
-    known = [row for row in completed if row['boxes'] is not None]
-    distribution = Counter(row['boxes'] for row in known)
-    total = len(completed)
-    type_totals = {name: 0 for name in BOX_TYPE_NAMES}
-    for row in known:
-        counts = row.get('box_types')
-        if counts is None:
-            type_totals['unknown'] += row['boxes']
-        else:
-            for name in BOX_TYPE_NAMES:
-                type_totals[name] += counts.get(name, 0)
-    total_boxes = sum(row['boxes'] for row in known)
+def _summary(completed, distribution, type_totals, rewards):
+    known = sum(distribution.values())
+    total_boxes = sum(count * occurrences for count, occurrences in distribution.items())
     return {
-        'started': len(rounds),
-        'completed': total,
-        'interrupted': sum(row['status'] == 'interrupted' for row in rounds),
-        'unfinished': sum(row['status'] == 'running' for row in rounds),
-        'known_box_rounds': len(known),
-        'unknown_box_rounds': total - len(known),
+        'completed': completed,
+        'known_box_rounds': known,
+        'unknown_box_rounds': completed - known,
         'total_boxes': total_boxes,
+        **rewards,
         'box_type_totals': type_totals,
         'box_type_percentages': {
             name: round(100 * count / total_boxes, 2) if total_boxes else 0.0
@@ -72,11 +65,53 @@ def summarize(rounds):
         },
         'distribution': [
             {'boxes': count, 'rounds': occurrences,
-             'percent_of_completed': round(100 * occurrences / total, 2),
-             'percent_of_known': round(100 * occurrences / len(known), 2)}
+             'percent_of_completed': round(100 * occurrences / completed, 2),
+             'percent_of_known': round(100 * occurrences / known, 2)}
             for count, occurrences in sorted(distribution.items())
         ],
     }
+
+
+def summarize(rounds):
+    completed = 0
+    distribution = Counter()
+    type_totals = dict.fromkeys(BOX_TYPE_NAMES, 0)
+    rewards = dict.fromkeys((key for fields in REWARD_FIELDS.values() for key in fields), 0)
+    for row in rounds:
+        if row['status'] != 'completed':
+            continue
+        completed += 1
+        for name, (total, known) in REWARD_FIELDS.items():
+            amount = row.get(name)
+            if type(amount) is int and amount >= 0:
+                rewards[total] += amount
+                rewards[known] += 1
+        count = row['boxes']
+        if count is None:
+            continue
+        distribution[count] += 1
+        counts = row.get('box_types')
+        if counts is None:
+            type_totals['unknown'] += count
+        else:
+            for name in BOX_TYPE_NAMES:
+                type_totals[name] += counts.get(name, 0)
+    return _summary(completed, distribution, type_totals, rewards)
+
+
+def combine_summaries(summaries):
+    completed = 0
+    distribution = Counter()
+    type_totals = Counter(dict.fromkeys(BOX_TYPE_NAMES, 0))
+    rewards = dict.fromkeys((key for fields in REWARD_FIELDS.values() for key in fields), 0)
+    for summary in summaries:
+        completed += summary['completed']
+        type_totals.update(summary['box_type_totals'])
+        for key in rewards:
+            rewards[key] += summary.get(key, 0)
+        for bucket in summary['distribution']:
+            distribution[bucket['boxes']] += bucket['rounds']
+    return _summary(completed, distribution, dict(type_totals), rewards)
 
 
 class RunStatistics:
@@ -90,6 +125,8 @@ class RunStatistics:
         self.current = None
         self.reported_rounds = set()
         self.closed = False
+        self._history_cache = {}
+        self._history_summary = summarize([])
         self.save()
 
     def begin(self):
@@ -97,6 +134,7 @@ class RunStatistics:
             return
         row = {'id': uuid.uuid4().hex, 'started_at': now(), 'ended_at': None,
                'status': 'running', 'boxes': None, 'box_source': None,
+               'coins': None, 'exp': None,
                'note': None, 'box_types': None, 'box_types_source': None}
         self.session['rounds'].append(row)
         self.current = row
@@ -123,13 +161,23 @@ class RunStatistics:
         self.current['box_source'] = source
         self.save()
 
+    def record_rewards(self, amounts):
+        if self.current is None or self.current['status'] != 'completed':
+            return
+        if any(name not in REWARD_FIELDS or type(amount) is not int or amount < 0
+               for name, amount in amounts.items()):
+            raise ValueError('Rewards must be nonnegative integer Coins or EXP amounts.')
+        new = {name: amount for name, amount in amounts.items()
+               if self.current.get(name) is None}
+        if new:
+            self.current.update(new)
+            self.save()
+
     def leave_round(self, reason='Returned to menu'):
         if self.current is None:
             return
         if self.current['status'] == 'running':
-            self.current['status'] = 'interrupted'
-            self.current['ended_at'] = now()
-            self.current['note'] = reason
+            self.session['rounds'].pop()
         else:
             if self.current['boxes'] and self.current.get('box_types') is None:
                 self.current['box_types_note'] = reason + ': no confirmed box-type screen was recorded.'
@@ -155,21 +203,38 @@ class RunStatistics:
         self.save()
         return True
 
+    def _historical_summary(self):
+        cached = self._history_cache
+        current = {}
+        # Directory entries can supply Windows file metadata without opening each file.
+        with os.scandir(self.path.parent) as entries:
+            for entry in entries:
+                if entry.name == self.path.name or not entry.name.lower().endswith('.json'):
+                    continue
+                try:
+                    metadata = entry.stat()
+                    signature = (metadata.st_mtime_ns, metadata.st_size, metadata.st_ctime_ns)
+                    record = cached.get(entry.name)
+                    if record is None or record[0] != signature:
+                        rows = json.loads(Path(entry.path).read_text(encoding='utf-8'))['rounds']
+                        record = (signature, summarize(rows))
+                    current[entry.name] = record
+                except (OSError, ValueError, KeyError, TypeError):
+                    print(f'⚠️ Could not read statistics file: {entry.name}')
+        if current != cached:
+            self._history_cache = current
+            self._history_summary = combine_summaries(entry[1] for entry in current.values())
+        return self._history_summary
+
     def save(self):
-        self.session['summary'] = summarize(self.session['rounds'])
+        summary = self.session['summary'] = summarize(self.session['rounds'])
         write_json(self.path, self.session)
-        all_rounds = []
-        for path in sorted((self.directory / 'sessions').glob('*.json')):
-            try:
-                all_rounds.extend(json.loads(path.read_text(encoding='utf-8'))['rounds'])
-            except (OSError, ValueError, KeyError):
-                print(f'⚠️ Could not read statistics file: {path.name}')
+        all_time = combine_summaries((self._historical_summary(), summary))
         write_json(self.directory / 'summary.json', {
-            'updated_at': now(), 'current_session': self.session['summary'],
-            'all_sessions': summarize(all_rounds),
+            'updated_at': now(), 'current_session': summary, 'all_sessions': all_time,
         })
-        lines = [format_summary(self.session['summary'], 'SESSION SUMMARY'), '',
-                 format_summary(summarize(all_rounds), 'ALL-TIME SUMMARY')]
+        lines = [format_summary(summary, 'SESSION SUMMARY'), '',
+                 format_summary(all_time, 'ALL-TIME SUMMARY')]
         temporary = self.directory / 'summary.txt.tmp'
         temporary.write_text('\n'.join(lines) + '\n', encoding='utf-8-sig')
         os.replace(temporary, self.directory / 'summary.txt')
@@ -181,8 +246,7 @@ class RunStatistics:
         row = self.current
         if row is None or row['status'] != 'completed' or row['id'] in self.reported_rounds:
             return
-        number = next(index for index, item in enumerate(self.session['rounds'], 1)
-                      if item['id'] == row['id'])
+        number = len(self.session['rounds'])
         count = row['boxes']
         if count is None:
             report = f'Round {number} Complete Mystery Boxes: unknown'

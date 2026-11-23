@@ -36,6 +36,7 @@ def device_capture_screen(ip: str, port: int):
     result = run_adb(
         ["adb", "-s", f"{ip}:{port}", "exec-out", "screencap", "-p"],
         stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         check=True
     )
     img = np.frombuffer(result.stdout, dtype=np.uint8)

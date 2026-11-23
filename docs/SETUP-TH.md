@@ -55,9 +55,9 @@ adb -s 127.0.0.1:5555 shell wm size
 ## 5. เปิดแอปและทดลองหนึ่งรอบ
 
 1. เปิดเกมให้ถึงเมนูหลัก แล้วดับเบิลคลิก **cookierun-classic-autorun.cmd** ครั้งแรกให้รอหน้าต่างติดตั้งสร้าง **.venv** และดาวน์โหลดไลบรารีจนแอปเปิด
-2. ที่ **Saved Settings** ตั้ง **Stop after N rounds** เป็น **1** สำหรับทดสอบ ถ้าต้องการลองโดยไม่ซื้อบูสต์ ให้ปิด **Fast Start**, **Cookie Relay** และตั้ง **Random Boost** เป็น **Off**
+2. ที่ **Settings** ตั้ง **Round Limit** เป็น **1** สำหรับทดสอบ ถ้าต้องการลองโดยไม่ซื้อบูสต์ ให้ปิด **Fast Start**, **Cookie Relay** และตั้ง **Random Boost** เป็น **Off**
 3. กด **Start** ด้านขวาบน แล้วดู **Activity Log** ถ้าต้องการหยุดก่อนครบ ให้กด **Stop** และรอจนขึ้นสถานะหยุด
-4. ดูผลใน **Latest Round** และ **Session Summary** ถ้าต้องการรันแบบไม่จำกัดจำนวนรอบ ให้ตั้ง **Stop after N rounds** เป็น **0**
+4. ดูผลใน **Latest Round** และ **Summary** ถ้าต้องการรันแบบไม่จำกัดจำนวนรอบ ให้ตั้ง **Round Limit** เป็น **0**
 
 ![หน้าหลักของแอปหลังจบรอบตัวอย่าง](images/desktop-app.png)
 
@@ -65,9 +65,9 @@ adb -s 127.0.0.1:5555 shell wm size
 
 ## 6. เปิดดู Log และแก้ปัญหา
 
-กด **Open Logs** แล้วเลือก **Current Activity** หรือวันเวลาของรอบเก่า ติ๊ก **Errors & warnings** เพื่อกรอง และกด **Copy Log** เพื่อคัดลอกข้อความที่แสดง ส่วน **Session History** ใช้ดูสรุปและเปิด Log ของรอบนั้นโดยตรง
+กด **Open Logs** ใน Activity Log แล้วเลือก **Current Activity** หรือวันเวลาของรอบเก่า ติ๊ก **Error & Warnings** เพื่อกรอง และกด **Copy Log** เพื่อคัดลอกข้อความที่แสดง ส่วน **History** ใช้ดูสรุปย้อนหลังตามวันเวลา
 
-![หน้าต่าง Activity Logs และตัวเลือก Errors & warnings](images/activity-logs.png)
+![หน้าต่าง Activity Logs และตัวเลือก Error & Warnings](images/activity-logs.png)
 
 | อาการ | วิธีตรวจ |
 | --- | --- |

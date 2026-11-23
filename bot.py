@@ -45,6 +45,7 @@ from config import (
     BOOST_M30P_COLLISION_DAMAGE_TEMPLATE,
     BOOST_MAGNETIC_AURA_TEMPLATE,
     BOOST_REVIVE_ONCE_WITH_80HP_TEMPLATE,
+    CONNECTION_LOST_RELOAD_BUTTON,
     DETECTION_ALWAYS_STAGES,
     DETECTION_GROUPS,
     DETECTION_RECOVERY_SCAN_INTERVAL,
@@ -56,10 +57,11 @@ from config import (
 )
 from detection import detect_stage, load_templates
 from run_statistics import RunStatistics, write_json
-from box_results import read_result_boxes
+from box_results import ResultConnectionLost, read_result_screen
 from box_types import read_box_types
 from startup_updates import StartupUpdates
 from opening_jumps import OpeningJumps
+from gift_draw import draw_gifts, gift_main_menu, gift_pick_position, wait_for_screen
 
 # -------------------
 # BOT OPTIONS
@@ -82,7 +84,7 @@ SETTINGS_PATH = Path(__file__).with_name('last_settings.json')
 
 def save_options(path, options):
     write_json(path, {key: value for key, value in options.items()
-                      if key != 'desired_boost_template'})
+                      if key not in ('desired_boost_template', 'run_mode')})
 
 
 def get_detection_stage_names(group_name, exclude=None):
@@ -115,6 +117,8 @@ def load_saved_options(path):
             raise ValueError('Invalid saved options')
         options = {key: saved[key] for key in flags}
         options['jump_at_start'] = saved.get('jump_at_start') is True
+        gift_limit = saved.get('gift_limit', 1)
+        options['gift_limit'] = gift_limit if type(gift_limit) is int and 1 <= gift_limit <= 9999 else 1
         round_limit = saved.get('round_limit', 0)
         options['round_limit'] = round_limit if type(round_limit) is int and round_limit >= 0 else 0
         boost_name = saved.get('desired_boost_name') if options['use_desired_random_boost'] else None
@@ -192,7 +196,38 @@ def prompt_user_options(settings_path=None):
 # -------------------
 # MAIN LOOP
 # -------------------
-def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
+def recover_game_connection(wait, on_status, updates):
+    max_attempts = 2
+    for attempt in range(1, max_attempts + 1):
+        if on_status:
+            on_status(f'Reconnecting ({attempt}/{max_attempts})')
+        print(f'🔌 Connection lost. Tapping Confirm ({attempt}/{max_attempts}).')
+        device_tap(DEVICE_IP, DEVICE_PORT, *CONNECTION_LOST_RELOAD_BUTTON)
+
+        for check in range(15):
+            wait(2)
+            screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+            stage = detect_stage(screen, ['ANTI_BOT', 'MAINMENU'])
+            if stage == 'ANTI_BOT':
+                raise RuntimeError('Player verification required. Complete it in LDPlayer, then start again.')
+            if updates.dismiss_popup(screen):
+                continue
+            if stage == 'MAINMENU':
+                print('✅ Connection restored. Back at the main menu.')
+                if on_status:
+                    on_status('Connection restored')
+                return
+            if check % 5 == 0 and updates.check_login_during_reconnect(screen):
+                return
+
+        if not detect_stage(screen, ['CONNECTION_LOST']):
+            break
+
+    raise RuntimeError('Connection lost. The game did not return to the main menu. Check LDPlayer, then start again.')
+
+
+
+def main(options=None, *, stop=None, on_status=None, statistics_factory=None, on_error=None):
     statistics = None
     interactive_window = stop is not None
 
@@ -212,12 +247,15 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
 
         if options is None:
             options = prompt_user_options()
-        statistics = (statistics_factory or RunStatistics)()
+        mode = options.get('run_mode', 'auto') if interactive_window else 'auto'
+        if mode == 'auto':
+            statistics = (statistics_factory or RunStatistics)()
         round_limit = options.get('round_limit', 0) if interactive_window else 0
         if on_status:
             on_status('Running')
         updates = StartupUpdates()
-        print('📊 Statistics are saved in stats/summary.txt and stats/sessions/.')
+        if statistics is not None:
+            print('📊 Statistics are saved in stats/summary.txt and stats/sessions/.')
         relic_exclude = None if options["detect_relic"] else {"RELIC_COMPLETE", "RELIC_CLAIM"}
 
         last_stage = None
@@ -235,7 +273,21 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
             device_screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
             if interactive_window and detect_stage(device_screen, ['ANTI_BOT']):
                 raise RuntimeError('Player verification required. Complete it in LDPlayer, then start again.')
+            if detection_group != 'IN_GAME' and updates.dismiss_popup(device_screen):
+                last_stage = None
+                wait(1)
+                continue
             stage = detect_stage(device_screen, get_detection_stage_names(detection_group, exclude=relic_exclude))
+            if mode != 'auto' and stage != 'CONNECTION_LOST':
+                if gift_main_menu(device_screen):
+                    stage = 'MAINMENU'
+                elif mode == 'gifts' and gift_pick_position(device_screen):
+                    stage = 'GIFT_PICK'
+            if updates.login_required:
+                if stage != 'MAINMENU':
+                    wait(2)
+                    continue
+                updates.login_required = False
             if stage is None:
                 if time.time() - last_detected_time >= DETECTION_RECOVERY_SCAN_INTERVAL[detection_group]:
                     stage = detect_stage(device_screen, exclude=relic_exclude)
@@ -252,8 +304,17 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
                 continue
 
             if stage is None and updates.handle_if_needed(device_screen):
+                if updates.login_required and on_status:
+                    on_status('กรุณา Login')
                 last_stage = None
                 detection_group = 'PRE_GAME'
+                continue
+
+            if mode != 'auto' and stage not in ('MAINMENU', 'GIFT_PICK', 'CONNECTION_LOST'):
+                if last_stage != 'waiting-for-menu' and on_status:
+                    on_status('Waiting for Main Menu')
+                last_stage = 'waiting-for-menu'
+                wait(1)
                 continue
 
             if stage == last_stage:
@@ -264,7 +325,28 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
             if on_status and stage:
                 on_status(stage.replace('_', ' ').title())
 
-            if stage == "MAINMENU":
+            if stage in ("MAINMENU", "GIFT_PICK"):
+                updates.popup_closes = 0
+                if mode == 'gifts':
+                    if on_status:
+                        on_status('Opening Gifts')
+                    opened = draw_gifts(options['gift_limit'], wait, device_screen, on_status=on_status)
+                    return f'Gift Draw Finished · {opened} Opened'
+                if mode == 'hearts':
+                    if on_status:
+                        on_status('Sending Hearts')
+                    def heartbeat_progress(count):
+                        if on_status:
+                            on_status(f'Hearts Sent · {count}')
+
+                    completed = handle_send_friend_life(
+                        on_progress=heartbeat_progress, until_exhausted=True, wait=wait)
+                    if not completed:
+                        raise RuntimeError('Heart sending could not continue. Check LDPlayer and the Activity Log.')
+                    wait_for_screen(wait, lambda screen: True if (
+                        detect_stage(screen, ['MAINMENU']) == 'MAINMENU' or gift_main_menu(screen)
+                    ) else None, 'the main menu', activity='Send Hearts')
+                    return 'Heart Sending Complete'
                 statistics.leave_round()
                 if round_limit and statistics.session['summary']['completed'] >= round_limit:
                     print(f'Round limit reached: {round_limit} completed. Stopping at the main menu.')
@@ -345,12 +427,22 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
                 detection_group = "IN_GAME"
             elif stage == "GAME_COMPLETE":
                 print("✅ Detected Stage: GAME_COMPLETE")
-                capture_round_result(statistics, device_screen)
+                try:
+                    capture_round_result(statistics, device_screen, wait)
+                except ResultConnectionLost:
+                    detection_group = "POST_GAME"
+                    last_stage = None
+                    continue
                 complete_finish()
                 detection_group = "POST_GAME"
             elif stage == "MYSTERY_BOX":
                 print("🎁 Detected Stage: MYSTERY_BOX")
-                capture_box_types(statistics)
+                try:
+                    capture_box_types(statistics)
+                except ResultConnectionLost:
+                    detection_group = "POST_GAME"
+                    last_stage = None
+                    continue
                 accept_mystery_box()
                 wait(3)
                 detection_group = "POST_GAME"
@@ -394,7 +486,6 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
                 detection_group = "PRE_GAME"
             elif stage == "OVERTAKE_BREAK_SCORE":
                 print("🏆 Detected Stage: OVERTAKE_BREAK_SCORE")
-                capture_round_result(statistics, device_screen)
                 accept_overtake_break_score()
                 detection_group = "POST_GAME"
                 last_stage = None
@@ -418,9 +509,16 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
                 last_stage = None
             elif stage == "CONNECTION_LOST":
                 print("🔌 Detected Stage: CONNECTION_LOST")
-                statistics.leave_round('Connection lost before a result was observed')
+                if statistics is not None:
+                    statistics.leave_round('Connection lost before a result was observed')
                 if interactive_window:
-                    raise RuntimeError('Game connection lost. Reopen the game in LDPlayer, then start again.')
+                    recover_game_connection(wait, on_status, updates)
+                    if updates.login_required and on_status:
+                        on_status('กรุณา Login')
+                    detection_group = 'PRE_GAME'
+                    last_stage = None
+                    is_first_game = True
+                    continue
                 device_reset_app(DEVICE_IP, DEVICE_PORT,
                                  startup_handler=lambda: updates.handle_if_needed(force=True))
                 wait(5)
@@ -436,9 +534,13 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
                 last_stage = None
             wait(0.25)
     except KeyboardInterrupt:
+        if interactive_window:
+            return 'Stopped by User'
         print("🛑 Bot stopped by user.")
     except Exception as e:
         if interactive_window:
+            if on_error is not None:
+                on_error(e)
             raise
         print(f"❌ An error occurred: {e}")
     finally:
@@ -446,37 +548,42 @@ def main(options=None, *, stop=None, on_status=None, statistics_factory=None):
             statistics.close()
 
 
-def capture_round_result(statistics, screen):
+def capture_round_result(statistics, screen, wait=None):
     if statistics.current is not None and statistics.current['status'] == 'completed':
         return
+    count, evidence, rewards = read_result_screen(screen)
+    if wait is not None:
+        wait(0)
     statistics.complete()
-    try:
-        count, evidence = read_result_boxes(screen)
-        if count is None:
-            statistics.current['box_source'] = evidence
-            statistics.current['note'] = 'Box counter was not stable or readable in three captures.'
-            statistics.save()
-            print(f'⚠️ Box count could not be confirmed. Saved screenshot: {evidence}')
-        else:
-            statistics.record_boxes(count, evidence)
-            if count == 0:
-                statistics.print_round()
-    except Exception as error:
-        print(f'⚠️ Could not read box count; recorded as unknown: {error}')
+    statistics.record_rewards(rewards)
+    missing = [label for name, label in (('coins', 'Coins'), ('exp', 'EXP')) if name not in rewards]
+    if missing:
+        print(f'⚠️ {", ".join(missing)} could not be confirmed on the settled result screen.')
+    if count is None:
+        statistics.current['box_source'] = evidence
+        statistics.current['note'] = 'Box counter was not stable or readable on the result screen.'
+        statistics.save()
+        print('⚠️ Result box count unreadable. Checking the Mystery Box screen if it appears.')
+        print(f'📸 Result screenshot saved: {evidence}')
+    else:
+        statistics.record_boxes(count, evidence)
+        if count == 0:
+            statistics.print_round()
 
 
 def capture_box_types(statistics):
     current = statistics.current
     if current is None or current['status'] != 'completed':
         return
-    if current['boxes'] is None or current.get('box_types') is not None:
+    if current.get('box_types') is not None or current['boxes'] == 0:
         return
-    try:
-        counts, evidence = read_box_types(current['boxes'])
-        if counts is None:
-            print(f'⚠️ Could not confirm box types. Screenshot: {evidence}')
-            return
-        statistics.record_box_types(counts, evidence)
-        statistics.print_round()
-    except Exception as error:
-        print(f'⚠️ Could not read box types; keeping count as unknown type: {error}')
+    counts, evidence = read_box_types(current['boxes'])
+    if counts is None:
+        print(f'⚠️ Mystery Boxes could not be confirmed. Screenshot: {evidence}')
+        return
+    if current['boxes'] is None:
+        count = sum(counts.values())
+        statistics.record_boxes(count, evidence)
+        print(f'✅ Box count recovered from the Mystery Box screen: {count}.')
+    statistics.record_box_types(counts, evidence)
+    statistics.print_round()

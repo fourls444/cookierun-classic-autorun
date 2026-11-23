@@ -7,7 +7,7 @@ from pathlib import Path
 import cv2
 
 
-def read_text(screen):
+def read_text(screen, *, timeout=25):
     if screen is None:
         raise ValueError('No screenshot available for OCR.')
     success, encoded = cv2.imencode('.png', screen)
@@ -21,7 +21,7 @@ def read_text(screen):
              'Bypass', '-File', str(Path(__file__).with_name('read_screen_text.ps1')),
              '-ImagePath', str(image_path)],
             capture_output=True, text=True, encoding='utf-8', errors='replace',
-            timeout=25, creationflags=subprocess.CREATE_NO_WINDOW,
+            timeout=timeout, creationflags=subprocess.CREATE_NO_WINDOW,
         )
         if result.returncode:
             raise RuntimeError('Windows OCR failed: ' + result.stderr.strip()[-500:])
