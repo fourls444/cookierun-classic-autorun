@@ -1,11 +1,16 @@
 """Open earned Gift Draws from the main menu."""
+import time
+
 import cv2
 import numpy as np
 
 from adb import device_capture_screen, device_tap
-from config import DEVICE_IP, DEVICE_PORT
 from detection import detect_stage, detect_templates
 
+
+GIFT_TAP_WAIT = 0.6
+GIFT_POLL_INTERVAL = 0.35
+GIFT_RESULT_TIMEOUT = 15
 
 GIFT_DRAW_SHORTCUT = (396, 675)
 GIFT_PICK_BOTTOM_RIGHT = (784, 550)
@@ -42,21 +47,37 @@ def gift_main_menu(screen):
             and gift_control(screen, 'HOME_RIBBON') is not None)
 
 
-def gift_pick_position(screen):
-    if not gift_control(screen, 'HEADER') or not gift_control(screen, 'PICK_TITLE'):
-        return None
-    x, y = GIFT_PICK_BOTTOM_RIGHT
-    patch = cv2.cvtColor(screen[y - 12:y + 12, x - 12:x + 12], cv2.COLOR_BGR2HSV)
-    # Once a box is picked, its blue wrapping disappears during the reward reveal.
-    blue = cv2.inRange(patch, (92, 50, 45), (135, 255, 255))
-    if cv2.countNonZero(blue) >= blue.size / 2:
-        return GIFT_PICK_BOTTOM_RIGHT
+def gift_pick_screen(screen):
+    return bool(gift_control(screen, 'HEADER') and gift_control(screen, 'PICK_TITLE'))
+
+
+def gift_overview(screen):
+    close = gift_control(screen, 'CLOSE')
+    if close and gift_control(screen, 'HEADER') and gift_control(screen, 'DRAW_BUTTON'):
+        return gift_control(screen, 'DRAW_BUTTON', enabled=True), close
     return None
 
 
-def wait_for_screen(wait, find, description, activity='Gift Draw'):
-    for _ in range(20):
-        screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+def gift_result(screen):
+    if not gift_control(screen, 'RESULT_TITLE'):
+        return None
+    # The cover and buttons can be dimmed for a frame during the reward
+    # animation, so fall back to the plain position instead of missing the screen.
+    confirm = gift_control(screen, 'CONFIRM', enabled=True) or gift_control(screen, 'CONFIRM')
+    if confirm:
+        return confirm, gift_control(screen, 'DRAW_AGAIN', enabled=True)
+    return None
+
+
+def gift_draw_screen(screen):
+    return bool(gift_pick_screen(screen) or gift_result(screen) or gift_overview(screen))
+
+
+def wait_for_screen(wait, find, description, activity='Gift Draw', *,
+                    timeout=10, interval=0.5):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        screen = device_capture_screen()
         if detect_stage(screen, ['ANTI_BOT']) == 'ANTI_BOT':
             raise RuntimeError('Player verification required. Complete it in LDPlayer, then start again.')
         if detect_stage(screen, ['CONNECTION_LOST']) == 'CONNECTION_LOST':
@@ -64,34 +85,29 @@ def wait_for_screen(wait, find, description, activity='Gift Draw'):
         found = find(screen)
         if found is not None:
             return found
-        wait(0.5)
+        wait(interval)
     raise RuntimeError(f'{activity} could not find {description}. Check LDPlayer.')
 
 
 def draw_gifts(limit, wait, main_screen, *, on_status=None):
     if type(limit) is not int or not 1 <= limit <= 9999:
         raise ValueError('Gift Draw limit must be from 1 to 9999.')
-    pick_ready = gift_pick_position(main_screen) is not None
-    if not pick_ready and not gift_main_menu(main_screen):
-        raise RuntimeError('Gift Draw shortcut was not found on the main menu.')
 
     def tap(position):
-        device_tap(DEVICE_IP, DEVICE_PORT, *position)
-        wait(0.8)
+        device_tap(*position)
+        wait(GIFT_TAP_WAIT)
 
-    def overview(screen):
-        if not gift_control(screen, 'HEADER') or not gift_control(screen, 'CLOSE'):
-            return None
-        if gift_control(screen, 'DRAW_BUTTON'):
-            return (gift_control(screen, 'DRAW_BUTTON', enabled=True), gift_control(screen, 'CLOSE'))
-        return None
-
-    def result(screen):
-        if gift_control(screen, 'RESULT_TITLE'):
-            confirm = gift_control(screen, 'CONFIRM', enabled=True)
-            if confirm:
-                return confirm, gift_control(screen, 'DRAW_AGAIN', enabled=True)
-        return None
+    def open_one_gift():
+        """Tap the selection once more only when the tap clearly did not register."""
+        for attempt in range(2):
+            tap(GIFT_PICK_BOTTOM_RIGHT)
+            try:
+                return wait_for_screen(wait, gift_result, 'the gift result',
+                                       timeout=GIFT_RESULT_TIMEOUT,
+                                       interval=GIFT_POLL_INTERVAL)
+            except RuntimeError:
+                if attempt or not gift_pick_screen(device_capture_screen()):
+                    raise
 
     def exit_screen(screen):
         if gift_control(screen, 'HEADER'):
@@ -102,18 +118,32 @@ def draw_gifts(limit, wait, main_screen, *, on_status=None):
             return ()
         return None
 
-    close = None
-    if not pick_ready:
-        tap(GIFT_DRAW_SHORTCUT)
-        draw, close = wait_for_screen(wait, overview, 'the Gift Draw menu')
-        if draw:
-            tap(draw)
-            pick_ready = True
+    selection_visible = gift_pick_screen(main_screen)
+    previous_result = gift_result(main_screen)
+    if previous_result:
+        confirm, draw_again = previous_result
+        tap(draw_again or confirm)
+        pick_ready = draw_again is not None
+    else:
+        pick_ready = selection_visible
+        if not pick_ready:
+            overview = gift_overview(main_screen)
+            if overview is None:
+                if not gift_main_menu(main_screen):
+                    raise RuntimeError('Gift Draw shortcut was not found on the main menu.')
+                tap(GIFT_DRAW_SHORTCUT)
+                overview = wait_for_screen(wait, gift_overview, 'the Gift Draw menu')
+            draw, _ = overview
+            if draw:
+                tap(draw)
+                pick_ready = True
     opened = 0
     if pick_ready:
         while opened < limit:
-            tap(wait_for_screen(wait, gift_pick_position, 'the bottom-right gift box'))
-            confirm, draw_again = wait_for_screen(wait, result, 'the gift result')
+            if not selection_visible:
+                wait_for_screen(wait, lambda screen: gift_pick_screen(screen) or None,
+                                'the gift selection screen', interval=GIFT_POLL_INTERVAL)
+            confirm, draw_again = open_one_gift()
             opened += 1
             print(f'🎁 Gift Opened · {opened}/{limit}')
             if on_status:
@@ -122,10 +152,10 @@ def draw_gifts(limit, wait, main_screen, *, on_status=None):
                 tap(confirm)
                 break
             tap(draw_again)
-        exit_state = wait_for_screen(wait, exit_screen, 'the Gift Draw close button or main menu')
-        close = exit_state[0] if exit_state else None
-    if close:
-        tap(close)
+            selection_visible = False
+    exit_state = wait_for_screen(wait, exit_screen, 'the Gift Draw close button or main menu')
+    if exit_state:
+        tap(exit_state[0])
         wait_for_screen(wait, lambda screen:
                              True if gift_main_menu(screen) else None,
                              'the main menu')

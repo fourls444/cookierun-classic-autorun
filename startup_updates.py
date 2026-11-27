@@ -8,8 +8,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 
-from adb import device_capture_screen, device_tap, run_adb
-from config import DEVICE_IP, DEVICE_PORT
+from adb import device_address, device_capture_screen, device_tap, run_adb
 import detection
 from screen_text import read_text, save_evidence
 
@@ -19,7 +18,7 @@ GAME_ACTIVITY = GAME_PACKAGE + '/com.devsisters.CookieRunForKakao.OvenbreakX'
 
 
 def adb_command(*arguments):
-    result = run_adb(['adb', '-s', f'{DEVICE_IP}:{DEVICE_PORT}', 'shell',
+    result = run_adb(['adb', '-s', device_address(), 'shell',
                              *arguments], capture_output=True, text=True,
                             encoding='utf-8', errors='replace', timeout=20)
     if result.returncode:
@@ -165,11 +164,11 @@ class StartupUpdates:
         if position is None or (package or foreground_package()) != GAME_PACKAGE:
             return False
         if self.popup_closes >= 6:
-            path = save_evidence(screen, 'popup-not-cleared')
+            path = save_evidence(screen, 'popup-not-cleared', error=True)
             raise RuntimeError(f'Could not close {label} after 6 attempts. Screenshot: {path}')
         self.popup_closes += 1
         print(f'🪟 Closing {label} ({self.popup_closes}/6).')
-        device_tap(DEVICE_IP, DEVICE_PORT, *position)
+        device_tap(*position)
         return True
 
 
@@ -194,7 +193,7 @@ class StartupUpdates:
         if not force and time.monotonic() - self.last_check < 15:
             return False
         self.last_check = time.monotonic()
-        screen = screen if screen is not None else device_capture_screen(DEVICE_IP, DEVICE_PORT)
+        screen = screen if screen is not None else device_capture_screen()
         try:
             lines = read_text(screen)
             package = foreground_package()
@@ -215,18 +214,18 @@ class StartupUpdates:
         while time.monotonic() < deadline:
             kind, position = action
             if kind == 'needs_help':
-                path = save_evidence(screen, 'update-needs-help')
+                path = save_evidence(screen, 'update-needs-help', error=True)
                 raise RuntimeError(f'Update requires manual confirmation. Screenshot: {path}')
             if kind == 'open':
                 adb_command('am', 'start', '-W', '-n', GAME_ACTIVITY)
             elif kind == 'tap':
                 tap_counts[position] = tap_counts.get(position, 0) + 1
                 if tap_counts[position] > 3:
-                    path = save_evidence(screen, 'update-repeated-button')
+                    path = save_evidence(screen, 'update-repeated-button', error=True)
                     raise RuntimeError(f'Update button did not advance after 3 attempts. Screenshot: {path}')
-                device_tap(DEVICE_IP, DEVICE_PORT, *position)
+                device_tap(*position)
             time.sleep(5)
-            screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+            screen = device_capture_screen()
             package = foreground_package()
             if package == GAME_PACKAGE and detection.detect_stage(screen, ['ANTI_BOT']) == 'ANTI_BOT':
                 raise RuntimeError('Player verification required. Complete it in LDPlayer, then start again.')
@@ -244,10 +243,10 @@ class StartupUpdates:
             if action is None:
                 ready_checks += 1
                 if ready_checks >= 4:
-                    path = save_evidence(screen, 'update-unrecognized')
+                    path = save_evidence(screen, 'update-unrecognized', error=True)
                     raise RuntimeError(f'Update flow reached an unrecognized screen. Screenshot: {path}')
                 action = ('wait', None)
             else:
                 ready_checks = 0
-        path = save_evidence(screen, 'update-timeout')
+        path = save_evidence(screen, 'update-timeout', error=True)
         raise RuntimeError(f'Update exceeded 10 minutes. Screenshot: {path}')

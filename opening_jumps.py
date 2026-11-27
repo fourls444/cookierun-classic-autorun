@@ -3,7 +3,6 @@ import time
 from dataclasses import dataclass
 
 from adb import device_tap
-from config import DEVICE_IP, DEVICE_PORT
 from detection import detect_templates
 
 
@@ -44,5 +43,5 @@ class OpeningJumps:
         for index in range(7):
             if index:
                 wait(0.45)
-            device_tap(DEVICE_IP, DEVICE_PORT, 160, 630)
+            device_tap(160, 630)
         return True

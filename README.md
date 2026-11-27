@@ -45,10 +45,11 @@ Double-click **cookierun-classic-autorun.cmd** again after the commands succeed.
 - **Rounds**, next to **Open Logs**, lets you choose a saved run and view Coins, EXP and boxes for each completed round. Select a round to see its box types and open its saved screenshot when available. A dash marks an unread value.
 - **Open Folder** opens `stats/sessions/` in File Explorer. With the app stopped, move unwanted old JSON files out of the folder or delete them yourself. Close and reopen **History** to refresh it. Saved logs are separate in `stats/logs/`.
 - **Open Logs** shows saved activity by date. Use **Error & Warnings** to filter the list, or **Copy Log** to copy the text. The app uses colored text labels such as **[WAIT]** and **[ERROR]**. Saved log files keep the original messages. The **?** button opens the in-app guide.
+- **Storage**, next to **Open Logs**, shows how much space screenshots, logs and session history use. **Open Screenshots** opens the folder, and **Delete Old Screenshots** removes screenshots older than the age you pick (1, 3, 7 or 30 days) after a confirmation. Error screenshots are kept unless you tick **Include error screenshots**. **Keep screenshots of successful rounds** is off by default, so only failures and unreadable results are saved to `stats/screenshots/errors/`; turn it on if you want a picture of every round.
 
 ### Local files
 
-Git ignores `.venv/`, `last_settings.json`, `stats/`, caches, and backups. Keep the settings and stats folders when moving an existing installation.
+Git ignores `.venv/`, `last_settings.json`, `stats/`, caches, and backups. Keep the settings and stats folders when moving an existing installation. Screenshots are saved in `stats/screenshots/`, and screenshots of failures or unreadable results go to `stats/screenshots/errors/`.
 
 ## ภาษาไทย
 
@@ -93,7 +94,8 @@ adb version
 - **Rounds** อยู่ข้าง **Open Logs** ใช้เลือกวันเวลาและดู Coins, EXP และกล่องทีละรอบ เลือกรอบเพื่อดูประเภทกล่องและเปิดภาพที่บันทึกไว้ถ้ามี ขีดหมายถึงอ่านค่าไม่ได้
 - **Open Folder** เปิด `stats/sessions/` ใน File Explorer หยุดโปรแกรมก่อนย้ายหรือลบไฟล์ JSON เก่าที่ไม่ใช้ แล้วปิดและเปิด **History** ใหม่เพื่อให้รายการอัปเดต ส่วนไฟล์ Log อยู่แยกใน `stats/logs/`
 - **Open Logs** เลือกดูข้อความย้อนหลังตามวันเวลา ใช้ **Error & Warnings** เพื่อกรอง หรือ **Copy Log** เพื่อคัดลอกข้อความ ในแอปใช้ป้ายสี เช่น **[WAIT]** และ **[ERROR]** ส่วนไฟล์ Log เก็บข้อความต้นฉบับ กด **?** เพื่อเปิดคู่มือในโปรแกรม
+- **Storage** ข้าง **Open Logs** แสดงพื้นที่ที่ภาพหน้าจอ Log และประวัติการใช้ไป ใช้ **Open Screenshots** เปิดโฟลเดอร์ และ **Delete Old Screenshots** ลบภาพที่เก่ากว่าช่วงเวลาที่เลือก (1, 3, 7 หรือ 30 วัน) หลังยืนยันแล้ว ภาพของรอบที่ผิดพลาดจะไม่ถูกลบ เว้นแต่จะติ๊ก **Include error screenshots** ส่วน **Keep screenshots of successful rounds** ปิดไว้เป็นค่าเริ่มต้น โปรแกรมจะเก็บเฉพาะภาพของรอบที่ผิดพลาดหรืออ่านผลไม่ได้ไว้ใน `stats/screenshots/errors/` ถ้าต้องการภาพทุกรอบให้ติ๊กช่องนี้
 
 ### ไฟล์ในเครื่อง
 
-Git จะข้าม `.venv/`, `last_settings.json`, `stats/` รวมถึงแคชและไฟล์สำรอง หากย้ายโปรแกรมไปเครื่องอื่น ให้เก็บ `last_settings.json` และ `stats/` ไว้เพื่อใช้ค่าตั้งและประวัติเดิม
+Git จะข้าม `.venv/`, `last_settings.json`, `stats/` รวมถึงแคชและไฟล์สำรอง หากย้ายโปรแกรมไปเครื่องอื่น ให้เก็บ `last_settings.json` และ `stats/` ไว้เพื่อใช้ค่าตั้งและประวัติเดิม ภาพหน้าจอปกติอยู่ใน `stats/screenshots/` ส่วนภาพของรอบที่ผิดพลาดหรืออ่านผลไม่ได้จะอยู่ใน `stats/screenshots/errors/`

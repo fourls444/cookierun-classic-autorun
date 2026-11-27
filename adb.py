@@ -1,13 +1,43 @@
 import random
+import struct
 import subprocess
+import threading
 import time
 from contextvars import ContextVar
 
 import cv2
 import numpy as np
 
+from config import DEVICE_IP, DEVICE_PORT
+
 
 stop_signal = ContextVar('adb_stop_signal', default=None)
+
+# Each worker thread can talk to a different LDPlayer instance.
+_device = threading.local()
+
+
+def set_device(ip, port):
+    """Point this thread's ADB commands at one device or LDPlayer instance."""
+    ip, port = str(ip), int(port)
+    _device.ip = ip
+    _device.port = port
+    return ip, port
+
+
+def get_device():
+    return getattr(_device, 'ip', DEVICE_IP), getattr(_device, 'port', DEVICE_PORT)
+
+
+def _address(ip=None, port=None):
+    current_ip, current_port = get_device()
+    return (current_ip if ip is None else ip,
+            current_port if port is None else port)
+
+
+def device_address(ip=None, port=None):
+    ip, port = _address(ip, port)
+    return f'{ip}:{port}'
 
 
 def run_adb(command, **kwargs):
@@ -20,7 +50,8 @@ def run_adb(command, **kwargs):
     return subprocess.run(command, **kwargs)
 
 
-def device_connect(ip: str, port: int):
+def device_connect(ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
     result = run_adb(
         ["adb", "connect", f"{ip}:{port}"],
         stdout=subprocess.PIPE,
@@ -32,7 +63,34 @@ def device_connect(ip: str, port: int):
         raise Exception(f"❌ Failed to connect to {ip}:{port}\n{result.stderr.strip()}")
 
 
-def device_capture_screen(ip: str, port: int):
+def _decode_raw_capture(data):
+    """Turn `screencap` raw output into a BGR frame, or None if unreadable."""
+    if len(data) < 16:
+        return None
+    width, height, pixel_format = struct.unpack('<III', data[:12])
+    if pixel_format != 1 or not 0 < width <= 4096 or not 0 < height <= 4096:
+        return None
+    size = width * height * 4
+    if len(data) < size:
+        return None
+    pixels = np.frombuffer(data[-size:], dtype=np.uint8).reshape(height, width, 4)
+    return cv2.cvtColor(pixels, cv2.COLOR_RGBA2BGR)
+
+
+def device_capture_screen(ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
+    # Raw screencap skips PNG encoding on the device, which is roughly twice as
+    # fast as `screencap -p` on LDPlayer.
+    result = run_adb(
+        ["adb", "-s", f"{ip}:{port}", "exec-out", "screencap"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True
+    )
+    frame = _decode_raw_capture(result.stdout)
+    if frame is not None:
+        return frame
+    # Fall back to PNG for devices that do not emit a raw header.
     result = run_adb(
         ["adb", "-s", f"{ip}:{port}", "exec-out", "screencap", "-p"],
         stdout=subprocess.PIPE,
@@ -43,7 +101,8 @@ def device_capture_screen(ip: str, port: int):
     return cv2.imdecode(img, cv2.IMREAD_COLOR)
 
 
-def device_tap(ip: str, port: int, x: int, y: int):
+def device_tap(x: int, y: int, ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
     run_adb(
         ["adb", "-s", f"{ip}:{port}", "shell", "input", "tap", str(x), str(y)],
         stdout=subprocess.PIPE,
@@ -52,7 +111,8 @@ def device_tap(ip: str, port: int, x: int, y: int):
     )
 
 
-def safe_device_tap(ip: str, port: int, x: int, y: int):
+def safe_device_tap(x: int, y: int, ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
     jitter_x = x + random.randint(-15, 15)
     jitter_y = y + random.randint(-15, 15)
     run_adb(
@@ -63,7 +123,9 @@ def safe_device_tap(ip: str, port: int, x: int, y: int):
     )
 
 
-def safe_device_scroll(ip: str, port: int, x: int, y: int, direction: str = "up", distance: int = 500, duration: int = 300):
+def safe_device_scroll(x: int, y: int, direction: str = "up", distance: int = 500, duration: int = 300,
+                       ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
     jx = x + random.randint(-15, 15)
     jy = y + random.randint(-15, 15)
     direction_map = {
@@ -84,7 +146,8 @@ def safe_device_scroll(ip: str, port: int, x: int, y: int, direction: str = "up"
     )
 
 
-def device_is_app_running(ip: str, port: int, package: str) -> bool:
+def device_is_app_running(package: str, ip: str = None, port: int = None) -> bool:
+    ip, port = _address(ip, port)
     result = run_adb(
         ["adb", "-s", f"{ip}:{port}", "shell", "pidof", package],
         stdout=subprocess.PIPE,
@@ -94,7 +157,9 @@ def device_is_app_running(ip: str, port: int, package: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def device_reset_app(ip: str, port: int, package: str = "com.devsisters.crg", max_retries: int = 5, startup_handler=None):
+def device_reset_app(*, startup_handler=None, package: str = "com.devsisters.crg", max_retries: int = 5,
+                     ip: str = None, port: int = None):
+    ip, port = _address(ip, port)
     print(f"🔄 Resetting app {package} on device at {ip}:{port}...")
     run_adb(
         ["adb", "-s", f"{ip}:{port}", "shell", "cmd", "activity", "force-stop", package],
@@ -119,12 +184,12 @@ def device_reset_app(ip: str, port: int, package: str = "com.devsisters.crg", ma
         if startup_handler is not None:
             startup_handler()
 
-        if device_is_app_running(ip, port, package):
+        if device_is_app_running(package):
             print(f"📊 App {package} is running, verifying stability...")
             stable = True
             for check in range(1, 4):
                 time.sleep(20)
-                if not device_is_app_running(ip, port, package):
+                if not device_is_app_running(package):
                     print(f"💥 App {package} crashed during stability check ({check}/3).")
                     stable = False
                     break

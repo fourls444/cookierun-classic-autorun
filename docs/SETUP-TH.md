@@ -46,7 +46,7 @@ adb -s 127.0.0.1:5555 shell wm size
 
 ตรวจว่า **127.0.0.1:5555** ขึ้นสถานะ **device** และขนาดหน้าจอเป็น **1280x720** ถ้ามีทั้ง **Physical size** และ **Override size** ให้ดู **Override size** บางเครื่องอาจมี **emulator-5554** ขึ้นอีกบรรทัดได้
 
-ถ้าเชื่อมไม่ได้ ให้ตรวจว่า LDPlayer ยังเปิดอยู่ แล้วเช็ก Local connection อีกครั้ง หากเปิด LDPlayer หลาย instance ให้ลองเหลือหนึ่ง instance ก่อน ถ้าเครื่องปลายทางใช้พอร์ตอื่น ให้ทดสอบด้วยพอร์ตนั้น และแก้ **DEVICE_PORT** ใน **config.py** ให้ตรงกัน
+ถ้าเชื่อมไม่ได้ ให้ตรวจว่า LDPlayer ยังเปิดอยู่ แล้วเช็ก Local connection อีกครั้ง ถ้าเปิดหลาย instance ด้วย LDMultiplayer ให้เปิดโปรแกรมแล้วเลือก instance ที่ช่อง **LDPlayer** ใน **Settings** กด **Refresh** เพื่อค้นหาอีกครั้ง โปรแกรมจะรันทีละ instance ถ้าเครื่องปลายทางใช้พอร์ตอื่น ให้ทดสอบด้วยพอร์ตนั้น และแก้ **DEVICE_PORT** ใน **config.py** ให้ตรงกัน
 
 ![ตำแหน่ง ADB debugging ใน LDPlayer](images/ldplayer-adb.png)
 

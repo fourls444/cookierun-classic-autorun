@@ -2,7 +2,9 @@ import json
 import os
 import queue
 import re
+import shutil
 import subprocess
+import sys
 import threading
 import tkinter as tk
 from bisect import bisect_right
@@ -14,9 +16,8 @@ from tkinter.font import Font
 
 import bot
 from adb import stop_signal
-from config import LIVES_INTERVAL, UI_NEXT_ROUND_DELAY
+from config import LIVES_INTERVAL, UI_NEXT_ROUND_DELAY, UI_NEXT_ROUND_DELAY_MIN
 from run_statistics import BOX_TYPE_LABELS, REWARD_FIELDS, RunStatistics, summarize
-from screen_text import save_evidence
 from session_lock import exclusive_session
 
 
@@ -49,7 +50,6 @@ LOG_TIME = re.compile(r'^\[?(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\]? ')
 SESSION_DATETIME_FORMAT = '%Y-%m-%d %H:%M:%S'
 LOG_SYMBOL = re.compile(r'^\s*(?P<icon>[\u2300-\u23ff\u2600-\u27bf\U0001f000-\U0001faff\u2b00-\u2bff])\ufe0f?\s+')
 LOG_COLORS = {'INFO': '#a3c9fc', 'WAIT': AMBER, 'OK': GREEN, 'WARN': AMBER, 'ERROR': RED}
-ISSUE_SCREENSHOT_STREAK = 4
 
 
 def fit_status_text(message, width, measure):
@@ -116,16 +116,18 @@ def activity_log_end(path):
 
 def round_screenshot(row, directory):
     root = directory.resolve()
+    folders = (root, root / 'errors')
     for field in ('issue_screenshot', 'box_source', 'box_types_source'):
         source = row.get(field)
         if not isinstance(source, str) or not source:
             continue
-        try:
-            path = (root / Path(source).name).resolve(strict=True)
-            if path.parent == root and path.suffix.lower() == '.png' and path.is_file():
-                return path
-        except (OSError, ValueError):
-            continue
+        for folder in folders:
+            try:
+                path = (folder / Path(source).name).resolve(strict=True)
+                if path.parent == folder and path.suffix.lower() == '.png' and path.is_file():
+                    return path
+            except (OSError, ValueError):
+                continue
     return None
 
 
@@ -403,8 +405,8 @@ def describe_session_error(error):
         return message, 'Main Menu Not Found\nOpen the main menu in LDPlayer.'
     if message == 'Heart sending could not continue. Check LDPlayer and the Activity Log.':
         return message, 'Heart Sending Incomplete\nCheck LDPlayer and the Activity Log.'
-    if message == 'Gift Draw could not find the bottom-right gift box. Check LDPlayer.':
-        return message, 'Gift Box Not Found\nCheck the Gift Draw screen in LDPlayer.'
+    if message == 'Gift Draw could not find the gift selection screen. Check LDPlayer.':
+        return message, 'Gift Selection Screen Not Found\nCheck the Gift Draw screen in LDPlayer.'
     return message, None
 
 
@@ -412,7 +414,6 @@ def run_session(options, stop, events):
     class WindowStatistics(RunStatistics):
         def __init__(self, directory=None):
             super().__init__(directory)
-            self.issue_streak = 0
             self.preparing = None
             output.on_line = self.observe_issue
             if log_path is not None:
@@ -443,7 +444,6 @@ def run_session(options, stop, events):
             elif message == 'Detected Stage: CONNECTION_LOST':
                 self.record_issue('Warning', 'Connection lost in LDPlayer.')
                 if self.current is None and self.preparing is not None:
-                    self.issue_streak += 1
                     self.preparing = None
 
         def record_issue(self, severity, message):
@@ -455,19 +455,6 @@ def run_session(options, stop, events):
             if entry in issues:
                 return
             issues.append(entry)
-            if len(issues) != 1 or self.issue_streak + 1 < ISSUE_SCREENSHOT_STREAK:
-                return
-            number = len(self.session['rounds']) + (self.current is None)
-            try:
-                frame = bot.device_capture_screen(bot.DEVICE_IP, bot.DEVICE_PORT)
-                row['issue_screenshot'] = save_evidence(frame, f'round_{number}_issue')
-            except KeyboardInterrupt:
-                if not stop.is_set():
-                    raise
-            except Exception as error:
-                output.emit(f'Warning: Round {number} issue screenshot unavailable: {error}')
-            else:
-                output.emit(f'📸 Round {number} issue screenshot saved: {row["issue_screenshot"]}')
 
         def complete(self):
             before = self.session['summary']['completed']
@@ -486,10 +473,6 @@ def run_session(options, stop, events):
             if self.current:
                 if self.current['status'] == 'running':
                     output.emit(f'Warning: Round {len(self.session["rounds"])} interrupted. {reason}.')
-                if self.current.get('round_issues'):
-                    self.issue_streak += 1
-                elif self.current['status'] == 'completed':
-                    self.issue_streak = 0
             super().leave_round(reason)
 
         def print_summary(self):
@@ -591,6 +574,18 @@ def enable_run_buttons(start, stop, *, start_enabled, stop_enabled):
                       cursor='hand2' if enabled else 'arrow')
 
 
+def keep_above_main(window, owner):
+    """Own the dialog window natively so it stays on top of the app with normal title-bar buttons."""
+    from ctypes import c_int, c_ssize_t, windll, wintypes
+
+    window.update_idletasks()
+    set_owner = getattr(windll.user32, 'SetWindowLongPtrW', windll.user32.SetWindowLongW)
+    set_owner.argtypes = [wintypes.HWND, c_int, c_ssize_t]
+    set_owner.restype = c_ssize_t
+    # GWL_HWNDPARENT: owned windows stay above the owner without Tk's transient style.
+    set_owner(int(window.wm_frame(), 0), -8, int(owner.wm_frame(), 0))
+
+
 class UtilityDialog:
     def __init__(self, owner, mode):
         self.mode = mode
@@ -598,12 +593,19 @@ class UtilityDialog:
         self.window = window = tk.Toplevel(owner.root)
         title = 'Send Hearts' if mode == 'hearts' else 'Open Gifts'
         window.title(title)
-        window.transient(owner.root)
+        if os.name != 'nt':
+            window.transient(owner.root)
         window.resizable(False, False)
         window.config(bg=PANEL, padx=16, pady=14)
         window.protocol('WM_DELETE_WINDOW', owner.close_utility)
         window.bind('<Escape>', lambda _event: owner.close_utility())
-        owner.label(window, title, 14, bold=True).pack(anchor='w')
+        self.root = owner.root
+        self.map_binding = self.root.bind('<Map>', self.restore, add='+')
+        window.bind('<Destroy>', self.forget, add='+')
+        window.bind('<Unmap>', self.minimize, add='+')
+        header = tk.Frame(window, bg=PANEL)
+        header.pack(fill='x')
+        owner.label(header, title, 14, bold=True).pack(side='left')
         description = ('Sends hearts until none remain or you press Stop.'
                        if mode == 'hearts' else
                        'Open earned gifts, then return to the main menu.')
@@ -657,8 +659,47 @@ class UtilityDialog:
         y = owner.root.winfo_rooty() + (owner.root.winfo_height() - height) // 2
         window.geometry(f'{width}x{height}+{max(0, x)}+{max(0, y)}')
         window.wait_visibility()
+        if os.name == 'nt':
+            # Tk's transient flag removes the title-bar minimize button and blocks
+            # iconifying the dialog, so link the native owner window instead.
+            keep_above_main(window, owner.root)
         window.grab_set()
         (self.gift_limit or self.start_button).focus_set()
+
+    def minimize(self, event=None):
+        """Send the app to the taskbar when the title bar is minimized."""
+        if event is not None and event.widget is not self.window:
+            return
+        if not self.window.winfo_exists() or self.window.state() != 'iconic':
+            return
+        try:
+            self.window.grab_release()
+        except tk.TclError:
+            pass
+        self.window.withdraw()
+        self.root.iconify()
+
+    def restore(self, event=None):
+        """Bring the dialog back, with its grab, when the app is restored."""
+        if event is not None and event.widget is not self.root:
+            return
+        if not self.window.winfo_exists():
+            return
+        if self.window.state() == 'withdrawn':
+            self.window.deiconify()
+        self.window.lift()
+        try:
+            self.window.grab_set()
+        except tk.TclError:
+            pass
+
+    def forget(self, event):
+        if event.widget is not self.window:
+            return
+        try:
+            self.root.unbind('<Map>', self.map_binding)
+        except tk.TclError:
+            pass
 
     def set_status(self, message, display, color):
         self.full_status = message
@@ -675,6 +716,53 @@ class UtilityDialog:
             self.gift_limit.config(state='disabled' if running else 'normal')
 
 
+def format_size(size):
+    value = float(size)
+    for unit in ('B', 'KB', 'MB'):
+        if value < 1024:
+            return f'{value:,.0f} {unit}' if unit == 'B' else f'{value:,.1f} {unit}'
+        value /= 1024
+    return f'{value:,.1f} GB'
+
+
+def folder_usage(directory):
+    total = count = 0
+    if not directory.is_dir():
+        return total, count
+    for path in directory.rglob('*'):
+        if not path.is_file():
+            continue
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+        count += 1
+    return total, count
+
+
+def total_size(paths):
+    total = 0
+    for path in paths:
+        try:
+            total += path.stat().st_size
+        except OSError:
+            continue
+    return total
+
+
+def old_evidence(directory, cutoff):
+    if not directory.is_dir():
+        return []
+    found = []
+    for path in directory.glob('*.png'):
+        try:
+            if path.stat().st_mtime < cutoff:
+                found.append(path)
+        except OSError:
+            continue
+    return found
+
+
 class DesktopWindow:
     def __init__(self, root):
         self.root = root
@@ -682,10 +770,12 @@ class DesktopWindow:
         self.stop_signal = threading.Event()
         self.worker = None
         self.closing = False
+        self.restarting = False
         self.target_rounds = 0
         self.history_window = None
         self.round_details_window = None
         self.logs_window = None
+        self.storage_window = None
         self.help_window = None
         self.utility = None
         box_icons = {key: tk.PhotoImage(file=ROOT / 'ui_assets' / f'{key}.png')
@@ -769,6 +859,7 @@ class DesktopWindow:
         choices.grid(row=1, column=0, columnspan=2, sticky='ew')
         choices.columnconfigure((0, 1), weight=1, uniform='choices')
         saved = bot.load_saved_options(bot.SETTINGS_PATH) or {}
+        self.keep_success = tk.BooleanVar(root, value=saved.get('keep_success_screenshots') is True)
         self.gift_limit = saved.get('gift_limit', 1)
         self.inputs = []
         self.flags = {}
@@ -873,6 +964,7 @@ class DesktopWindow:
         log_buttons.grid(row=0, column=2, sticky='e')
         self.small_button(log_buttons, 'Rounds', self.show_rounds).pack(side='left', padx=(0, 5))
         self.small_button(log_buttons, 'Open Logs', self.show_logs).pack(side='left', padx=(0, 5))
+        self.small_button(log_buttons, 'Storage', self.show_storage).pack(side='left', padx=(0, 5))
         self.progress_label = self.label(activity, '', 9, fg=MUTED)
         self.progress_label.grid(row=1, column=0, sticky='e', pady=(0, 3))
         self.progress_label.grid_remove()
@@ -965,7 +1057,7 @@ class DesktopWindow:
                 'Claim Relics: Claims Relic rewards when their screen appears.',
             )),
             ('Automatic behavior', (
-                f'Round 1 begins when the menu is ready. Later rounds wait an extra {UI_NEXT_ROUND_DELAY} seconds.',
+                f'Round 1 begins when the menu is ready. Later rounds wait an extra {UI_NEXT_ROUND_DELAY_MIN}-{UI_NEXT_ROUND_DELAY} seconds.',
                 f'Every {LIVES_INTERVAL // 60} minutes, at the main menu, the app checks Mailbox → Lives and tries Quick Receive & Send if hearts are available.',
                 'The app closes recognized event popups one at a time and checks the screen again after each close.',
                 'If Connection Lost appears, the app taps Confirm and waits for the main menu. It retries once if the dialog is still visible.',
@@ -976,6 +1068,7 @@ class DesktopWindow:
                 'Summary shows totals after stopping. Coins and EXP include only rounds with confirmed values. History opens earlier summaries.',
                 'Rounds shows Coins, EXP and boxes for each completed round in a saved run.',
                 'Activity Log shows timestamped events. Open Logs lets you review saved logs and filter errors and warnings. Copy Log copies the text.',
+                'Storage shows how much space screenshots and logs use. Delete Old Screenshots removes files older than the age you pick, after asking for confirmation.',
             )),
         )
         for heading, items in sections:
@@ -983,6 +1076,9 @@ class DesktopWindow:
             for item in items:
                 guide.insert('end', '• ' + item + '\n', 'item')
         guide.config(state='disabled')
+        restart_button = self.small_button(window, 'Restart App', self.restart)
+        restart_button.grid(row=2, column=0, sticky='w', pady=(8, 0))
+        add_tooltip(restart_button, 'Stops any active run and reopens this app.')
         close_button = self.small_button(window, 'Close', window.destroy)
         close_button.grid(row=2, column=0, sticky='e', pady=(8, 0))
         window.bind('<Escape>', lambda _event: window.destroy())
@@ -1264,13 +1360,143 @@ class DesktopWindow:
         show_selected_run()
         table.focus_set()
 
-    def open_session_folder(self, parent):
-        directory = STATS_DIR / 'sessions'
+    def open_folder(self, directory, parent):
         try:
             directory.mkdir(parents=True, exist_ok=True)
             os.startfile(directory)
         except OSError as error:
             messagebox.showerror('Could not open folder', str(error), parent=parent)
+
+    def open_session_folder(self, parent):
+        self.open_folder(STATS_DIR / 'sessions', parent)
+
+    def show_storage(self):
+        if self.storage_window is not None and self.storage_window.winfo_exists():
+            self.storage_window.lift()
+            return
+        window = self.storage_window = tk.Toplevel(self.root)
+        window.title('Storage')
+        window.transient(self.root)
+        window.configure(bg=PANEL, padx=14, pady=12)
+        window.resizable(False, False)
+        window.columnconfigure(0, weight=1)
+        window.bind('<Escape>', lambda _event: window.destroy())
+        self.label(window, 'Storage', 15, bold=True).grid(row=0, column=0, sticky='w')
+        screenshots = STATS_DIR / 'screenshots'
+        errors = screenshots / 'errors'
+        usage = tk.Frame(window, bg=PANEL)
+        usage.grid(row=1, column=0, sticky='ew', pady=(8, 2))
+        usage.columnconfigure(1, weight=1)
+        values = []
+        for index, (name, directory) in enumerate((('Screenshots', screenshots),
+                                                   ('Error screenshots', errors),
+                                                   ('Activity logs', STATS_DIR / 'logs'),
+                                                   ('Session history', STATS_DIR / 'sessions'))):
+            self.label(usage, name, 10).grid(row=index, column=0, sticky='w', pady=1)
+            value = self.label(usage, '', 10, fg=MUTED)
+            value.grid(row=index, column=1, sticky='e', pady=1)
+            values.append((value, directory))
+        free = self.label(window, '', 9, fg=MUTED)
+        free.grid(row=2, column=0, sticky='w', pady=(2, 0))
+        save_success = tk.BooleanVar(window, self.keep_success.get())
+
+        def save_success_setting():
+            self.keep_success.set(save_success.get())
+            settings = bot.load_saved_options(bot.SETTINGS_PATH) or {
+                key: False for key in ('use_fast_start', 'use_cookie_relay',
+                                       'use_desired_random_boost', 'detect_relic',
+                                       'jump_at_start')}
+            settings['keep_success_screenshots'] = save_success.get()
+            bot.save_options(bot.SETTINGS_PATH, settings)
+
+        success_check = tk.Checkbutton(
+            window, text='Keep screenshots of successful rounds', variable=save_success,
+            command=save_success_setting, bg=PANEL, fg=INK, selectcolor=FIELD,
+            activebackground=PANEL, activeforeground=INK, font=('Segoe UI', 10))
+        success_check.grid(row=3, column=0, sticky='w', pady=(4, 0))
+        add_tooltip(success_check, 'Off by default to save disk space. Failed or unreadable '
+                                   'results are always saved in screenshots/errors.')
+        buttons = tk.Frame(window, bg=PANEL)
+        buttons.grid(row=4, column=0, sticky='ew', pady=(7, 10))
+        self.small_button(buttons, 'Open Screenshots',
+                          lambda: self.open_folder(screenshots, window)).pack(side='left')
+        self.small_button(buttons, 'Open Logs',
+                          lambda: self.open_folder(STATS_DIR / 'logs', window)).pack(
+                              side='left', padx=6)
+        tk.Frame(window, bg=BORDER, height=1).grid(row=5, column=0, sticky='ew')
+        self.label(window, 'Clean up screenshots', 12, bold=True).grid(
+            row=6, column=0, sticky='w', pady=(9, 3))
+        controls = tk.Frame(window, bg=PANEL)
+        controls.grid(row=7, column=0, sticky='ew')
+        self.label(controls, 'Keep the last', 10).pack(side='left')
+        keep = ttk.Combobox(controls, values=('1 day', '3 days', '7 days', '30 days'), width=8,
+                            state='readonly', style='Dark.TCombobox')
+        keep.current(2)
+        keep.pack(side='left', padx=6)
+        include_errors = tk.BooleanVar(window, False)
+        tk.Checkbutton(controls, text='Include error screenshots', variable=include_errors,
+                       bg=PANEL, fg=INK, selectcolor=FIELD, activebackground=PANEL,
+                       activeforeground=INK, font=('Segoe UI', 10)).pack(side='left', padx=(8, 0))
+        plan = self.label(window, '', 9, fg=MUTED)
+        plan.config(wraplength=340, justify='left')
+        plan.grid(row=8, column=0, sticky='w', pady=(7, 5))
+        delete_button = self.small_button(window, 'Delete Old Screenshots', lambda: delete())
+        delete_button.grid(row=9, column=0, sticky='e')
+        window.bind('<Escape>', lambda _event: window.destroy())
+        age = {'1 day': 1, '3 days': 3, '7 days': 7, '30 days': 30}
+
+        def candidates():
+            cutoff = datetime.now().timestamp() - age[keep.get()] * 86400
+            found = old_evidence(screenshots, cutoff)
+            if include_errors.get():
+                found += old_evidence(errors, cutoff)
+            return found
+
+        def update_plan(*_event):
+            found = candidates()
+            plan.config(text=(f'{len(found):,} files · {format_size(total_size(found))} '
+                              f'would be removed' if found else
+                              'Nothing is older than the selected age.'))
+            delete_button.config(state='normal' if found else 'disabled')
+
+        def refresh(*_event):
+            for value, directory in values:
+                size, count = folder_usage(directory)
+                value.config(text=f'{format_size(size)} · {count:,} files')
+            try:
+                free.config(text=f'Free disk space: {format_size(shutil.disk_usage(ROOT).free)}')
+            except OSError:
+                free.config(text='')
+            update_plan()
+
+        def delete():
+            found = candidates()
+            if not found:
+                return
+            size = total_size(found)
+            if not messagebox.askyesno(
+                    'Delete old screenshots',
+                    f'Delete {len(found):,} screenshots ({format_size(size)})?\n\n'
+                    'This cannot be undone.', parent=window):
+                return
+            removed = 0
+            freed = 0
+            for path in found:
+                try:
+                    freed += path.stat().st_size
+                    path.unlink()
+                except OSError:
+                    continue
+                removed += 1
+            refresh()
+            messagebox.showinfo('Screenshots deleted',
+                                f'Removed {removed:,} files and freed {format_size(freed)}.',
+                                parent=window)
+
+        keep.bind('<<ComboboxSelected>>', update_plan)
+        include_errors.trace_add('write', update_plan)
+        self.small_button(buttons, 'Refresh', refresh).pack(side='right')
+        refresh()
 
     def copy_log(self, widget):
         text = widget.get('1.0', 'end-1c')
@@ -1414,7 +1640,8 @@ class DesktopWindow:
         if self.worker is not None or self.utility is None:
             return
         mode = self.utility.mode
-        options = {'run_mode': mode, 'detect_relic': False}
+        options = {'run_mode': mode, 'detect_relic': False,
+                   'keep_success_screenshots': self.keep_success.get()}
         if mode == 'gifts':
             field = self.utility.gift_limit
             value = field.get().strip()
@@ -1444,7 +1671,8 @@ class DesktopWindow:
         options = {key: value.get() for key, value in self.flags.items()}
         options.update(use_desired_random_boost=name is not None, desired_boost_name=name,
                        desired_boost_template=dict(bot.BOOST_CHOICES).get(name),
-                       round_limit=round_limit, gift_limit=self.gift_limit)
+                       round_limit=round_limit, gift_limit=self.gift_limit,
+                       keep_success_screenshots=self.keep_success.get())
         self.latest_text.config(text='Awaiting first round')
         self.latest_detail = ''
         self.summary_note.config(text='Available after Stop')
@@ -1522,6 +1750,10 @@ class DesktopWindow:
                 if self.closing:
                     self.root.destroy()
                     return
+                if self.restarting:
+                    self.restarting = False
+                    if self.relaunch():
+                        return
                 message, failed, display = payload
                 self.set_status(message, RED if failed else MUTED, display=display)
                 self.set_run_controls(start_enabled=True, stop_enabled=False)
@@ -1538,6 +1770,28 @@ class DesktopWindow:
     def set_run_controls(self, *, start_enabled, stop_enabled):
         enable_run_buttons(self.start_button, self.stop_button,
                            start_enabled=start_enabled, stop_enabled=stop_enabled)
+
+    def restart(self):
+        if self.closing or self.restarting:
+            return
+        if self.worker is None:
+            self.relaunch()
+        else:
+            self.restarting = True
+            self.stop()
+            self.set_status('Stopping to restart…', AMBER)
+
+    def relaunch(self):
+        flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
+        try:
+            subprocess.Popen([sys.executable, '-B', str(ROOT / 'desktop_ui.py')],
+                             cwd=ROOT, creationflags=flags)
+        except OSError as error:
+            messagebox.showerror('Restart App', f'Could not reopen the app.\n\n{error}',
+                                 parent=self.root)
+            return False
+        self.root.destroy()
+        return True
 
     def close(self):
         if self.worker is None:

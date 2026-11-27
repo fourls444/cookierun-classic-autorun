@@ -10,16 +10,15 @@ import cv2
 import numpy as np
 
 from adb import device_capture_screen, stop_signal
-from config import DEVICE_IP, DEVICE_PORT
 from detection import detect_stage
 from round_rewards import read_rewards
 from screen_text import read_text, save_evidence
 
-RESULT_SETTLE_SECONDS = 2.5
-RESULT_SAMPLE_SECONDS = 0.65
+RESULT_SETTLE_SECONDS = 1.2
+RESULT_SAMPLE_SECONDS = 0.4
 RESULT_CAPTURE_LIMIT = 15
 REWARD_STABLE_FRAMES = 3
-RESULT_READ_SECONDS = 9.5
+RESULT_READ_SECONDS = 5.0
 BOX_OCR_SECONDS = 2.4
 BOX_COUNTER = (1065, 207, 1127, 257)
 
@@ -50,13 +49,19 @@ def result_box_counters():
     return None if sheet is None else sheet.reshape(3, 50, 62) > 0
 
 
-def count_from_screen(screen):
+def box_counter_visible(screen):
     if screen is None or screen.shape[:2] != (720, 1280):
-        return None
+        return False
     area = screen[185:285, 975:1140]
     match = cv2.matchTemplate(cv2.cvtColor(area, cv2.COLOR_BGR2GRAY),
                               result_box_template(), cv2.TM_CCOEFF_NORMED)
-    if cv2.minMaxLoc(match)[1] >= 0.85:
+    return cv2.minMaxLoc(match)[1] >= 0.85
+
+
+def count_from_screen(screen):
+    if screen is None or screen.shape[:2] != (720, 1280):
+        return None
+    if box_counter_visible(screen):
         templates = result_box_counters()
         if templates is not None:
             x1, y1, x2, y2 = BOX_COUNTER
@@ -111,8 +116,11 @@ def read_result_screen(initial_screen):
     streaks = Counter()
     rewards = {}
     confirmed_boxes = None
-    previous_box_crop = None
-    stable_box_crop = False
+    counter_screen = None
+    counter_seen = False
+    zero_frames = 0
+    result_seen = False
+    reward_values_seen = set()
     evidence_screen = initial_screen
     check_result_stage(initial_screen, 'GAME_COMPLETE')
     started = time.monotonic()
@@ -125,16 +133,16 @@ def read_result_screen(initial_screen):
         if sample_at > now:
             wait_for_result_sample(sample_at - now)
         sample_at = time.monotonic() + RESULT_SAMPLE_SECONDS
-        last_screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+        last_screen = device_capture_screen()
         if not check_result_stage(last_screen, 'GAME_COMPLETE'):
             last_amounts = {}
             streaks.clear()
             rewards = {}
-            previous_box_crop = None
-            stable_box_crop = False
             continue
         evidence_screen = last_screen
+        result_seen = True
         amounts = read_rewards(last_screen, settled_only=True)
+        reward_values_seen.update(amounts)
         streaks = Counter({name: streaks[name] + 1 if amount == last_amounts.get(name) else 1
                            for name, amount in amounts.items()})
         last_amounts = amounts
@@ -142,19 +150,55 @@ def read_result_screen(initial_screen):
                    if streaks[name] >= REWARD_STABLE_FRAMES}
         if confirmed_boxes is None:
             count = count_from_screen(last_screen)
-            if count is not None:
+            if box_counter_visible(last_screen):
+                counter_seen = True
+                counter_screen = last_screen
+                zero_frames = 0
+            elif count == 0:
+                zero_frames += 1
+            else:
+                zero_frames = 0
+            if count:
                 box_observations[count] += 1
                 if box_observations[count] >= 2:
                     confirmed_boxes = count
-            box_crop = last_screen[195:275, 985:1130]
-            stable_box_crop = np.array_equal(box_crop, previous_box_crop)
-            previous_box_crop = box_crop
-        if len(rewards) == 2 and (confirmed_boxes is not None or stable_box_crop):
+        # Keep sampling until the box counter itself is readable; coins and EXP
+        # settle before the counter appears, so they must not end the read early.
+        if len(rewards) == 2 and confirmed_boxes is not None:
             break
-    if confirmed_boxes is None and stable_box_crop:
-        try:
-            confirmed_boxes = read_unusual_box_count(evidence_screen, deadline)
-        except (RuntimeError, OSError, ValueError, TimeoutExpired) as error:
-            print(f'⚠️ Box count could not be read: {error}')
-    label = 'result-boxes-unknown' if confirmed_boxes is None else f'result-{confirmed_boxes}-boxes'
-    return confirmed_boxes, save_evidence(evidence_screen, label), rewards
+    reasons = {}
+    for name in ('coins', 'exp'):
+        if name in rewards:
+            continue
+        if not result_seen:
+            reasons[name] = 'Result screen not detected during sampling'
+        elif name in reward_values_seen:
+            reasons[name] = 'Value did not stabilize'
+        else:
+            reasons[name] = 'No readable value on a settled frame'
+    if confirmed_boxes is None:
+        if not result_seen:
+            reasons['boxes'] = 'Result screen not detected during sampling'
+        elif not counter_seen and zero_frames >= 2:
+            # The counter area stayed empty for the whole window: a zero-box round.
+            confirmed_boxes = 0
+        elif not counter_seen:
+            reasons['boxes'] = 'Box counter did not appear before the read window ended'
+        else:
+            try:
+                # Give OCR its own short budget even when sampling used the window up.
+                confirmed_boxes = read_unusual_box_count(counter_screen,
+                                                         time.monotonic() + BOX_OCR_SECONDS)
+                if confirmed_boxes is None:
+                    reasons['boxes'] = 'Counter unreadable on settled screen'
+            except TimeoutExpired:
+                reasons['boxes'] = 'Counter OCR timed out'
+            except (RuntimeError, OSError, ValueError) as error:
+                reasons['boxes'] = f'Counter OCR failed: {error}'
+    # An unknown count is not worth a picture: the result screen never shows the
+    # box type, and the Mystery Box screen that follows shows the boxes themselves.
+    evidence = None
+    if confirmed_boxes is not None:
+        screen = counter_screen if counter_screen is not None else evidence_screen
+        evidence = save_evidence(screen, f'result-{confirmed_boxes}-boxes')
+    return confirmed_boxes, evidence, rewards, reasons

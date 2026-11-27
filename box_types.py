@@ -9,7 +9,6 @@ import numpy as np
 
 from adb import device_capture_screen
 from box_results import check_result_stage
-from config import DEVICE_IP, DEVICE_PORT
 from screen_text import save_evidence
 
 
@@ -102,22 +101,35 @@ def detect_box_types(screen, expected_count):
 def read_box_types(expected_count):
     previous = None
     previous_screen = None
-    time.sleep(0.8)
+    mystery_screen = None
+    candidates_seen = False
+    time.sleep(0.35)
     for attempt in range(3):
-        screen = device_capture_screen(DEVICE_IP, DEVICE_PORT)
+        screen = device_capture_screen()
         # Require a second capture even when its pixels can reuse the previous result.
         if not check_result_stage(screen, 'MYSTERY_BOX'):
             counts = None
-        elif previous is not None and np.array_equal(screen, previous_screen):
-            counts = previous
         else:
-            counts = detect_box_types(screen, expected_count)
+            mystery_screen = screen
+            if previous is not None and np.array_equal(screen, previous_screen):
+                counts = previous
+            else:
+                counts = detect_box_types(screen, expected_count)
+            if counts is not None:
+                candidates_seen = True
         if counts is not None and counts == previous:
             evidence = save_evidence(screen, 'mystery-box-types')
-            return counts, evidence
+            return counts, evidence, None
         previous = counts
         previous_screen = screen
         if attempt < 2:
-            time.sleep(0.5)
-    evidence = save_evidence(screen, 'mystery-box-types-unknown')
-    return None, evidence
+            time.sleep(0.3)
+    if mystery_screen is None:
+        reason = 'Mystery Box screen not detected during sampling'
+    elif candidates_seen:
+        reason = 'Box detections did not stabilize'
+    else:
+        reason = 'No box detections matched the expected count or appearance'
+    evidence = save_evidence(mystery_screen if mystery_screen is not None else screen,
+                             'mystery-box-types-unknown', error=True)
+    return None, evidence, reason
